@@ -1,72 +1,101 @@
 # Neo NDFC-NFC Bridge
 
-`neo_ndfc_nfc_bridge` 让 `neo_default_chatter` 保持唯一会话状态机，同时复用
-`neo_fatum_chatter` 的私聊提示词、心理活动流、消息格式、多模态、等待规则和 Actions。
-插件不会启动第二个 Chatter，也不会重复消费或 flush 消息。
+`neo_ndfc_nfc_bridge` 让 `neo_default_chatter` 直接拥有 NFC 风格的连续对话能力：
+人格化系统提示词、心理活动流、消息与内心时间线、原生多模态、等待与超时、
+情绪和用户习惯、分段回复，以及可实际触发 NDFC 的主动发起预约。
+
+桥不会加载或调用 `neo_fatum_chatter`，也不会注册第二个 Chatter。
+NDFC 始终是唯一的会话状态机和消息消费者。
 
 ## 依赖
 
+只需要启用：
+
 - `neo_default_chatter`
-- `neo_fatum_chatter`
+- `neo_ndfc_nfc_bridge`
 
-三个插件必须同时启用。桥接插件加载时会校验依赖，并直接复用 NFC 的
-`NFCSessionStore`，因此心理活动、等待状态、习惯和主动发起预约与 NFC 使用同一份数据。
+不需要安装或启用 `neo_fatum_chatter`。
 
-## 桥接能力
+## 工作方式
 
-| NDFC 切面 | 桥接行为 |
+桥通过高权重 Handler 订阅 NDFC 的全部 `NdfcEvent`，在以下切面提供内置能力：
+
+| NDFC 切面 | 桥内行为 |
 | --- | --- |
-| `format_unread_line` | 使用 NFC 的账号、消息 ID 和时间标签格式 |
-| `build_history_text` | 使用 NFC 的历史消息与 MentalLog 融合叙事 |
-| `inject_unread_payload` | 使用 NFC 的图片提取和原生多模态 payload |
-| `create_request` | 使用 NFC 配置的 `model_task` |
-| `preprocess` | 注入 NFC system prompt、近期记忆和动态关系上下文 |
-| `run_tool_call` | 在默认工具执行后记录 thought、mood、等待意图和心理活动 |
-| `build_resume_prompt` | 构造 NFC 风格的等待超时心理提示 |
-| `compute_cooldown` | 使用 NFC 等待上下限和连续超时规则规整冷却时间 |
-| `compute_stop_wake` | 有效等待期间按 NFC 规则抑制提前唤醒 |
-| `session_transition` | 更新并持久化 NFC 会话活跃时间 |
+| `format_unread_line` | 生成带时间、发送者和消息 ID 的叙事格式 |
+| `build_history_text` | 融合聊天记录与桥内心理活动 |
+| `inject_unread_payload` | 提取未读消息中的图片和表情包，构造多模态 payload |
+| `create_request` | 使用桥配置的模型任务 |
+| `preprocess` | 注入人格、自我认知、心理状态、习惯和工具协议 |
+| `run_tool_call` | 记录 thought、mood、等待意图和实际动作 |
+| `build_resume_prompt` | 等待超时后引导模型决定追问、继续等待或结束 |
+| `compute_cooldown` | 应用等待上下限和连续超时规则 |
+| `compute_stop_wake` | 有效等待期间抑制提前唤醒 |
+| `session_transition` | 持久化会话活跃时间 |
 
-桥 handler 订阅全部 17 个 `NdfcEvent`。`fetch_unreads`、`flush_unreads`、
-`pick_trigger_message`、`dedupe_tool_call`、`format_tool_result` 和
-`build_negative_extra` 保留 NDFC 默认实现，避免重复消费、重复去重或覆盖 NDFC 控制流。
+未覆盖的消息获取、flush、去重和工具执行仍由 NDFC 默认实现负责，避免重复消费。
 
 ## Actions
 
-桥接插件向 `neo_default_chatter` 提供以下 NFC Actions：
+桥向 `neo_default_chatter` 注册六个本地 Action：
 
-- `nfc_reply`
-- `do_nothing`
-- `schedule_proactive`
-- `nfc_query_activity_pattern`
-- `nfc_record_habit`
-- `nfc_query_habits`
+- `nfc_reply`：清洗并分段发送文本。
+- `do_nothing`：选择不回复或继续等待。
+- `update_mood_state`：持久化当前情绪。
+- `record_user_habit`：记录有对话证据支持的用户习惯。
+- `query_activity_pattern`：查询桥累计的活跃小时分布。
+- `schedule_proactive`：设置、覆盖或取消主动发起预约。
 
-`schedule_proactive` 会直接写入共享 NFC Session，而不是只返回提示文本。所有 Action
-都遵守 `enabled`、`expose_nfc_actions` 和 `private_only`，会在每个聊天流上动态判定。
+`schedule_proactive` 不只是保存时间戳。桥自己的后台调度器会在预约到期时通过
+`ChatterManager.resume_chatter()` 唤醒目标 NDFC 流，把主动上下文交给 NDFC 决策，
+再由模型选择 `nfc_reply` 或 `do_nothing`。
+
+## 数据
+
+桥只写入自己的目录：
+
+```text
+data/neo_ndfc_nfc_bridge/sessions/
+```
+
+首次加载时，如果本机存在旧的 `data/neo_fatum_chatter/sessions/`，桥会把等待、
+心理活动、情绪、习惯、预约和活跃时段复制到自己的目录。旧目录只是可选迁移来源；
+迁移后 NFC 插件和旧目录都不参与桥的运行。
 
 ## 配置
 
+主要开关位于 `bridge`：
+
 | 配置项 | 默认值 | 作用 |
 | --- | --- | --- |
-| `enabled` | `true` | 启用整个桥接插件 |
-| `private_only` | `true` | 仅向真实私聊流注入 NFC 行为 |
-| `use_nfc_system_prompt` | `true` | 注入 NFC system prompt 和动态关系上下文 |
-| `use_nfc_history` | `true` | 使用 NFC 心理活动融合历史 |
-| `use_nfc_message_format` | `true` | 使用 NFC 未读消息格式 |
-| `use_nfc_multimodal` | `true` | 使用 NFC 多模态 payload 构建 |
-| `expose_nfc_actions` | `true` | 注册并暴露 NFC Actions |
-| `use_nfc_waiting` | `true` | 桥接等待、超时、冷却和提前唤醒规则 |
-| `persist_mental_state` | `true` | 写入 MentalLog、mood、waiting 和会话活跃状态 |
+| `enabled` | `true` | 启用桥 |
+| `private_only` | `true` | 只对真实私聊流生效 |
+| `use_nfc_system_prompt` | `true` | 注入连续人格与心理上下文 |
+| `use_nfc_history` | `true` | 使用聊天与内心活动融合历史 |
+| `use_nfc_message_format` | `true` | 使用叙事式未读消息格式 |
+| `use_nfc_multimodal` | `true` | 直接把图片交给主模型 |
+| `expose_nfc_actions` | `true` | 注册六个本地 Action |
+| `use_nfc_waiting` | `true` | 启用等待、超时和提前唤醒规则 |
+| `persist_mental_state` | `true` | 持久化心理、情绪、习惯和预约 |
 
-`private_only=true` 时，早期事件若没有携带聊天类型，插件会通过 `stream_id` 查询
-已存在的真实聊天流。流不存在或类型未知时不会桥接，避免将私聊行为误注入群聊。
+其他配置节：
+
+- `model`：模型任务、每轮图片上限和额外决策指导。
+- `wait`：等待上下限、连续超时次数和提前唤醒规则。
+- `reply`：分段消息发送间隔。
+- `prompt`：心理日志条目上限和近期记忆开关。
+- `proactive`：检查间隔、沉默阈值、触发概率、最小间隔和勿扰时段。
+
+预约触发不受勿扰时段限制；概率性的沉默触发会遵守勿扰时段、最小间隔和已观察到的
+用户活跃规律。目标聊天流已经绑定其他 Chatter 时，桥不会覆盖该绑定。
 
 ## 验证
 
-在项目根目录执行：
+在 Neo-MoFox 项目根目录执行：
 
 ```powershell
-uv run pytest test/plugins/neo_ndfc_nfc_bridge/test_bridge_handler.py -q --no-cov
-uv run python examples/plugins/neo_ndfc_nfc_bridge_example.py
+uv run python -c "import plugins.neo_ndfc_nfc_bridge.plugin"
+uv run ruff check plugins/neo-ndfc-nfc-bridge
 ```
+
+插件加载日志应出现 `NDFC-NFC 桥已就绪`，且无需安装 `neo_fatum_chatter`。

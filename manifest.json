@@ -1,16 +1,17 @@
 {
   "name": "neo_ndfc_nfc_bridge",
   "display_name": "NDFC-NFC桥接",
-  "version": "0.1.0",
-  "description": "让 Neo-Default-Chatter 复用 NeoFatumChatter 的提示词、心理活动、记忆与动作能力",
+  "version": "0.1.1",
+  "description": "让 Neo-Default-Chatter 独立拥有心理活动、记忆、等待与主动发起能力",
   "author": "MoFox Team",
   "license": "AGPL-3.0",
   "dependencies": {
     "plugins": [
-      "neo_default_chatter",
-      "neo_fatum_chatter"
+      "neo_default_chatter"
     ],
-    "components": []
+    "components": [
+      "neo_default_chatter:chatter:neo_default_chatter"
+    ]
   },
   "include": [
     {
@@ -45,19 +46,19 @@
     },
     {
       "component_type": "action",
-      "component_name": "nfc_query_activity_pattern",
+      "component_name": "query_activity_pattern",
       "dependencies": [],
       "enabled": true
     },
     {
       "component_type": "action",
-      "component_name": "nfc_record_habit",
+      "component_name": "record_user_habit",
       "dependencies": [],
       "enabled": true
     },
     {
       "component_type": "action",
-      "component_name": "nfc_query_habits",
+      "component_name": "update_mood_state",
       "dependencies": [],
       "enabled": true
     },
@@ -75,7 +76,7 @@
   ],
   "tags": [
     "neo_default_chatter",
-    "neo_fatum_chatter",
+    "nfc-style",
     "bridge",
     "chat"
   ]

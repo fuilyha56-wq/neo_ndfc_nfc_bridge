@@ -6,27 +6,24 @@ import time
 from typing import Any, cast
 
 from plugins.neo_default_chatter.utils.event_publisher import NdfcEvent
-from plugins.neo_fatum_chatter.chatter import NeoFatumChatter
-from plugins.neo_fatum_chatter.config import NFCConfig
-from plugins.neo_fatum_chatter.context.sources.initial_source import (
-    build_initial_context_plan,
-)
-from plugins.neo_fatum_chatter.multimodal import extract_media_from_messages
-from plugins.neo_fatum_chatter.prompts.modules import build_timeout_context
-from plugins.neo_fatum_chatter.prompts.builder import NFCPromptBuilder
-from plugins.neo_fatum_chatter.models import WaitingConfig
 from src.app.plugin_system.api import prompt_api, stream_api
 from src.app.plugin_system.base import BaseEventHandler
 from src.kernel.event import EventDecision
 
+from .capabilities import (
+    BridgePromptBuilder,
+    extract_media_from_messages,
+    format_unread_message,
+)
 from .config import NdfcNfcBridgeConfig
+from .state import WaitingConfig
 
 
 class NdfcNfcBridgeHandler(BaseEventHandler):
-    """通过 NDFC 的全部公开事件切面复用 NFC 能力。"""
+    """通过 NDFC 的全部公开事件切面注入桥内 NFC 能力。"""
 
     name = "ndfc_nfc_bridge"
-    description = "把 NFC 的消息格式、心理历史、多模态和 Actions 注入 NDFC"
+    description = "把内置的 NFC 消息格式、心理历史、多模态和 Actions 注入 NDFC"
     weight = 100
     timeout: float | None = 0
     init_subscribe = list(NdfcEvent)
@@ -64,7 +61,7 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
         return chat_type == "private"
 
     async def _get_session(self, stream_id: str) -> Any:
-        """从 NFC 的共享 Store 获取当前会话。"""
+        """从桥独立 Store 获取当前会话。"""
         session_store = self.plugin.session_store
         async with session_store.lock(stream_id):
             return await session_store.get_or_create(stream_id)
@@ -88,34 +85,33 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
         config = self._config().bridge
 
         if event == NdfcEvent.FORMAT_UNREAD_LINE and config.use_nfc_message_format:
-            params["formatted_line"] = NeoFatumChatter.format_message_line(
+            params["formatted_line"] = format_unread_message(
                 params["message"], params.get("time_format") or "%H:%M"
             )
             return EventDecision.STOP, params
 
         if event == NdfcEvent.BUILD_HISTORY_TEXT and config.use_nfc_history:
             session = await self._get_session(params["stream_id"])
-            narrative = NFCPromptBuilder().build_fused_narrative(
+            narrative = BridgePromptBuilder().build_fused_narrative(
                 params["chat_stream"],
-                session.mental_log,
-                before_ts=getattr(session, "chain_cutoff_ts", 0.0) or None,
+                session,
             )
             params["lines"] = narrative.splitlines() if narrative else []
             return EventDecision.STOP, params
 
         if event == NdfcEvent.INJECT_UNREAD_PAYLOAD and config.use_nfc_multimodal:
             session = await self._get_session(params["stream_id"])
-            nfc_config = cast(NFCConfig, self.plugin.nfc_plugin.config)
-            max_images = int(nfc_config.general.max_images_per_payload)
+            bridge_config = self._config()
+            max_images = int(bridge_config.model.max_images_per_payload)
             media_items = extract_media_from_messages(
                 params.get("unread_msgs") or [], max_items=max_images
             )
-            payload, extra_payload = await NFCPromptBuilder().build_user_payload(
+            payload, extra_payload = await BridgePromptBuilder().build_user_payload(
                 params.get("formatted_text") or "",
                 media_items=media_items,
                 stream_id=params["stream_id"],
                 session=session,
-                config=nfc_config,
+                config=bridge_config,
             )
             params["response"].add_payload(payload)
             if extra_payload is not None:
@@ -127,8 +123,7 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
             return EventDecision.PASS, params
 
         if event == NdfcEvent.CREATE_REQUEST:
-            nfc_config = cast(NFCConfig, self.plugin.nfc_plugin.config)
-            params["task_name"] = nfc_config.general.model_task
+            params["task_name"] = self._config().model.model_task
             return EventDecision.SUCCESS, params
 
         if (
@@ -141,9 +136,8 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
 
         if event == NdfcEvent.COMPUTE_COOLDOWN and config.use_nfc_waiting:
             session = await self._get_session(params["stream_id"])
-            nfc_config = cast(NFCConfig, self.plugin.nfc_plugin.config)
             raw_seconds = float(params.get("minutes") or 0.0) * 60
-            cooldown_seconds = nfc_config.wait.apply_rules(
+            cooldown_seconds = self._config().wait.apply_rules(
                 raw_seconds,
                 session.consecutive_timeout_count,
             )
@@ -152,10 +146,9 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
 
         if event == NdfcEvent.COMPUTE_STOP_WAKE and config.use_nfc_waiting:
             session = await self._get_session(params["stream_id"])
-            nfc_config = cast(NFCConfig, self.plugin.nfc_plugin.config)
             waiting = session.waiting_config
             if (
-                nfc_config.wait.suppress_early_wake
+                self._config().wait.suppress_early_wake
                 and waiting.is_active()
                 and not waiting.is_timeout()
             ):
@@ -179,22 +172,17 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
         return EventDecision.PASS, params
 
     async def _inject_nfc_context(self, params: dict[str, Any]) -> None:
-        """把 NFC system prompt 和动态会话状态注入 NDFC 本轮上下文。"""
+        """把桥内 system prompt 和动态会话状态注入 NDFC 本轮上下文。"""
         config = self._config().bridge
         if not config.use_nfc_system_prompt:
             return
 
         session = await self._get_session(params["stream_id"])
-        nfc_config = cast(NFCConfig, self.plugin.nfc_plugin.config)
         chat_stream = params["chat_stream"]
-        plan = build_initial_context_plan(
-            chat_stream=chat_stream,
-            config=nfc_config,
-            session=session,
-        )
-        system_prompt = await NFCPromptBuilder().build_system_prompt(
+        system_prompt = await BridgePromptBuilder().build_system_prompt(
             chat_stream,
-            extra_vars=plan.system_extra_vars,
+            session,
+            self._config(),
         )
         if system_prompt:
             prompt_api.add_stream_reminder(
@@ -207,8 +195,15 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
         dynamic_parts: list[str] = []
         if session.history_summary:
             dynamic_parts.append(f"【近期记忆】\n{session.history_summary}")
-        if plan.dynamic_context:
-            dynamic_parts.append(plan.dynamic_context)
+        if session.scheduled_proactive_at is not None:
+            schedule_time = time.strftime(
+                "%Y-%m-%d %H:%M",
+                time.localtime(session.scheduled_proactive_at),
+            )
+            dynamic_parts.append(
+                f"【主动发起预约】{schedule_time}："
+                f"{session.scheduled_proactive_reason or '未说明理由'}"
+            )
         if dynamic_parts:
             existing = str(params.get("mutations") or "").strip()
             bridge_context = "\n\n".join(dynamic_parts)
@@ -220,7 +215,6 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
         """构造 NFC 风格的等待超时心理提示并更新超时计数。"""
         session_store = self.plugin.session_store
         stream_id = params["stream_id"]
-        nfc_config = cast(NFCConfig, self.plugin.nfc_plugin.config)
         async with session_store.lock(stream_id):
             session = await session_store.get_or_create(stream_id)
             session.consecutive_timeout_count += 1
@@ -229,18 +223,14 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
             wait_time = getattr(resume_event, "wait_time", None)
             if isinstance(wait_time, (int, float)):
                 elapsed = float(wait_time)
-            timeout_context = build_timeout_context(
+            timeout_payload = BridgePromptBuilder.build_timeout_payload(
                 elapsed_seconds=elapsed,
                 expected_reaction=session.waiting_config.expected_reaction,
                 consecutive_timeouts=session.consecutive_timeout_count,
-                max_consecutive_timeouts=nfc_config.wait.max_consecutive_timeouts,
+                last_bot_message=session.mental_log.get_last_bot_reply_content(),
+                max_consecutive_timeouts=self._config().wait.max_consecutive_timeouts,
             )
-            expected_reaction = session.waiting_config.expected_reaction.strip()
-            if expected_reaction:
-                timeout_context = (
-                    f"【你之前期待对方的反应】{expected_reaction}\n\n{timeout_context}"
-                )
-            params["prompt"] = timeout_context
+            params["prompt"] = str(timeout_payload.content[0].text)
             await session_store.save(session)
 
     async def _record_unreads(self, params: dict[str, Any]) -> None:
@@ -323,7 +313,6 @@ class NdfcNfcBridgeObserver(BaseEventHandler):
         if not successful_calls:
             return EventDecision.PASS, params
 
-        nfc_config = cast(NFCConfig, self.plugin.nfc_plugin.config)
         session_store = self.plugin.session_store
         stream_id = params["stream_id"]
         async with session_store.lock(stream_id):
@@ -332,7 +321,7 @@ class NdfcNfcBridgeObserver(BaseEventHandler):
                 args = dict(call.args) if isinstance(call.args, dict) else {}
                 wait_seconds = 0.0
                 if config.bridge.use_nfc_waiting:
-                    wait_seconds = nfc_config.wait.apply_rules(
+                    wait_seconds = config.wait.apply_rules(
                         float(args.get("max_wait_seconds") or 0.0),
                         session.consecutive_timeout_count,
                     )
