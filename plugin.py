@@ -22,7 +22,7 @@ class NdfcNfcBridgePlugin(BasePlugin):
     """为 Neo-Default-Chatter 内置 NFC 风格的连续对话能力。"""
 
     plugin_name = "neo_ndfc_nfc_bridge"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.0"
     plugin_author = "MoFox Team"
     plugin_description = "让 NDFC 独立拥有心理活动、记忆、等待与主动发起能力"
     configs = [NdfcNfcBridgeConfig]

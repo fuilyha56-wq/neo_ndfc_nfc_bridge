@@ -1,7 +1,7 @@
 {
   "name": "neo_ndfc_nfc_bridge",
   "display_name": "NDFC-NFC桥接",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "description": "让 Neo-Default-Chatter 独立拥有心理活动、记忆、等待与主动发起能力",
   "author": "MoFox Team",
   "license": "AGPL-3.0",
