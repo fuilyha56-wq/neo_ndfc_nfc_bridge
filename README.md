@@ -4,7 +4,7 @@
 Chatter 的前提下，为 NDFC 提供人格上下文、心理活动、原生多模态、等待与超时、
 分段回复、用户习惯和主动发起等能力。
 
-> 当前版本：`0.1.0`
+> 当前版本：`0.1.1`
 
 ## 设计原则
 
@@ -60,8 +60,9 @@ plugins/neo-ndfc-nfc-bridge/
 | `schedule_proactive` | 设置、覆盖或取消主动发起预约 |
 
 `schedule_proactive` 设置的预约由桥内调度器执行。预约到期后，调度器会通过
-`ChatterManager.resume_chatter()` 唤醒 NDFC，再由模型决定调用 `nfc_reply` 还是
-`do_nothing`。如果目标聊天流已绑定其他 Chatter，桥不会覆盖现有绑定。
+NDFC 的 `chat_core` Service 为目标流创建独立会话，再由模型决定调用 `nfc_reply`
+还是 `do_nothing`。该过程不查询、替换或恢复全局 Chatter 绑定，因此同一聊天流上
+由其他适配器使用的 Chatter 可以继续运行。
 
 ## 配置
 

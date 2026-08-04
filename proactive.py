@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 import asyncio
 import datetime
 import random
 import time
 from typing import TYPE_CHECKING, Any
 
-from src.app.plugin_system.api import chat_api, plugin_api, stream_api
+from src.app.plugin_system.api import service_api, stream_api
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.managers.chatter_manager import get_chatter_manager
+from src.app.plugin_system.base import Failure, WaitResumeEvent
 from src.kernel.concurrency import get_task_manager
 
 from .state import MentalLogEntry, NFCEventType
@@ -20,7 +22,15 @@ if TYPE_CHECKING:
 
 logger = get_logger("neo_ndfc_nfc_bridge.proactive")
 
-_NDFC_SIGNATURE = "neo_default_chatter:chatter:neo_default_chatter"
+_NDFC_SERVICE_SIGNATURE = "neo_default_chatter:service:chat_core"
+
+
+class _WakeOutcome(Enum):
+    """一次主动唤醒尝试的处理结果。"""
+
+    WOKEN = "woken"
+    SKIPPED = "skipped"
+    RETRY = "retry"
 
 
 class ProactiveScheduler:
@@ -122,8 +132,18 @@ class ProactiveScheduler:
             self._pending_streams.add(stream_id)
             try:
                 prompt = self._build_resume_prompt(session, reason, is_scheduled, now)
-                if not await self._wake_ndfc(stream_id, prompt):
+                outcome = await self._wake_ndfc(stream_id, prompt)
+                if outcome is _WakeOutcome.RETRY:
                     logger.warning(f"主动发起唤醒失败: stream={stream_id[:8]}")
+                    continue
+                if outcome is _WakeOutcome.SKIPPED:
+                    if is_scheduled:
+                        async with self._plugin.session_store.lock(stream_id):
+                            current = await self._plugin.session_store.get_or_create(
+                                stream_id
+                            )
+                            current.set_scheduled_proactive(None)
+                            await self._plugin.session_store.save(current)
                     continue
                 async with self._plugin.session_store.lock(stream_id):
                     current = await self._plugin.session_store.get_or_create(stream_id)
@@ -143,36 +163,69 @@ class ProactiveScheduler:
             finally:
                 self._pending_streams.discard(stream_id)
 
-    async def _wake_ndfc(self, stream_id: str, prompt: str) -> bool:
-        """激活目标流，确保绑定 NDFC 后注入恢复事件。"""
+    async def _wake_ndfc(self, stream_id: str, prompt: str) -> _WakeOutcome:
+        """通过 NDFC Service 独立驱动主动决策，不改动流上的 Chatter 绑定。"""
         chat_stream = await stream_api.activate_stream(stream_id)
         if chat_stream is None:
-            return False
+            logger.warning(f"主动发起目标流不存在: stream={stream_id[:8]}")
+            return _WakeOutcome.RETRY
         if self._plugin.config.bridge.private_only:
             chat_type = str(getattr(chat_stream, "chat_type", "") or "")
             if chat_type != "private":
-                return False
+                logger.info(
+                    f"按 private_only 跳过非私聊主动发起: "
+                    f"stream={stream_id[:8]} chat_type={chat_type or 'unknown'}"
+                )
+                return _WakeOutcome.SKIPPED
 
-        chatter = chat_api.get_chatter_by_stream(stream_id)
-        if chatter is None:
-            chatter_class = chat_api.get_chatter_class(_NDFC_SIGNATURE)
-            owner = plugin_api.get_plugin("neo_default_chatter")
-            if chatter_class is None or owner is None:
-                return False
-            chatter = chatter_class(stream_id=stream_id, plugin=owner)
-            chat_api.bind_chatter_for_stream(stream_id, chatter)
-        elif chatter.get_signature() != _NDFC_SIGNATURE:
-            logger.debug(
-                f"跳过已绑定其他 Chatter 的流: stream={stream_id[:8]} "
-                f"chatter={chatter.get_signature()}"
-            )
-            return False
+        context = chat_stream.context
+        if (
+            context.unread_messages
+            or context.message_cache
+            or context.is_chatter_processing
+        ):
+            logger.debug(f"目标流正在处理消息，延后主动发起: stream={stream_id[:8]}")
+            return _WakeOutcome.RETRY
 
-        return await get_chatter_manager().resume_chatter(
-            stream_id,
-            source="neo_ndfc_nfc_bridge.proactive",
-            extra={"resume_prompt": prompt},
+        service = service_api.get_service(_NDFC_SERVICE_SIGNATURE)
+        create_session = getattr(service, "create_session", None)
+        if not callable(create_session):
+            logger.warning("NDFC chat_core Service 不可用，无法主动发起")
+            return _WakeOutcome.RETRY
+
+        session = create_session(
+            stream_id=stream_id,
+            plugin=self._plugin.ndfc_plugin,
         )
+        runner = session.execute()
+        try:
+            initial_result = await anext(runner)
+            if isinstance(initial_result, Failure):
+                logger.warning(
+                    f"NDFC 主动会话初始化失败: stream={stream_id[:8]} "
+                    f"error={initial_result.error}"
+                )
+                return _WakeOutcome.RETRY
+            result = await runner.asend(
+                WaitResumeEvent(
+                    source="neo_ndfc_nfc_bridge.proactive",
+                    extra={"resume_prompt": prompt},
+                )
+            )
+            if isinstance(result, Failure):
+                logger.warning(
+                    f"NDFC 主动决策失败: stream={stream_id[:8]} error={result.error}"
+                )
+                return _WakeOutcome.RETRY
+            return _WakeOutcome.WOKEN
+        except StopAsyncIteration:
+            logger.warning(f"NDFC 主动会话提前结束: stream={stream_id[:8]}")
+            return _WakeOutcome.RETRY
+        except Exception:
+            logger.exception(f"NDFC 主动会话执行异常: stream={stream_id[:8]}")
+            return _WakeOutcome.RETRY
+        finally:
+            await runner.aclose()
 
     @staticmethod
     def _build_resume_prompt(

@@ -29,7 +29,20 @@ _METADATA_PATTERNS = tuple(
 )
 
 
-class NDFCReplyAction(BaseAction):
+class _NDFCBridgeAction(BaseAction):
+    """仅在桥接配置允许的聊天流中激活。"""
+
+    async def go_activate(self) -> bool:
+        """根据总开关和私聊范围决定是否暴露 Action。"""
+        if not self.plugin.config.bridge.enabled:
+            return False
+        return not (
+            self.plugin.config.bridge.private_only
+            and str(self.chat_stream.chat_type or "") != "private"
+        )
+
+
+class NDFCReplyAction(_NDFCBridgeAction):
     """向当前聊天流发送一条或多条自然语言消息。"""
 
     action_name = "nfc_reply"
@@ -104,7 +117,7 @@ class NDFCReplyAction(BaseAction):
         return True, f"已发送 {sent} 条消息"
 
 
-class NDFCDoNothingAction(BaseAction):
+class NDFCDoNothingAction(_NDFCBridgeAction):
     """选择不回复，并可继续等待用户。"""
 
     action_name = "do_nothing"
@@ -132,7 +145,7 @@ class NDFCDoNothingAction(BaseAction):
         return True, "已选择不回复"
 
 
-class NDFCUpdateMoodStateAction(BaseAction):
+class NDFCUpdateMoodStateAction(_NDFCBridgeAction):
     """记录对话角色当前的情绪状态。"""
 
     action_name = "update_mood_state"
@@ -158,7 +171,7 @@ class NDFCUpdateMoodStateAction(BaseAction):
         return True, f"已记录当前情绪：{mood.strip()}"
 
 
-class NDFCRecordUserHabitAction(BaseAction):
+class NDFCRecordUserHabitAction(_NDFCBridgeAction):
     """记录从聊天中观察到的稳定用户习惯。"""
 
     action_name = "record_user_habit"
@@ -191,7 +204,7 @@ class NDFCRecordUserHabitAction(BaseAction):
         return True, f"已记录习惯，当前共 {count} 条观察"
 
 
-class NDFCQueryActivityPatternAction(BaseAction):
+class NDFCQueryActivityPatternAction(_NDFCBridgeAction):
     """查询桥观察到的用户活跃小时分布。"""
 
     action_name = "query_activity_pattern"
@@ -225,7 +238,7 @@ class NDFCQueryActivityPatternAction(BaseAction):
         return True, f"累计观察 {total} 次；最活跃时段：{details}"
 
 
-class NDFCScheduleProactiveAction(BaseAction):
+class NDFCScheduleProactiveAction(_NDFCBridgeAction):
     """设置或取消桥自己的主动发起预约。"""
 
     action_name = "schedule_proactive"
@@ -235,6 +248,10 @@ class NDFCScheduleProactiveAction(BaseAction):
     )
     chatter_allow = ["neo_default_chatter"]
     associated_types = ["text"]
+
+    async def go_activate(self) -> bool:
+        """仅在主动功能启用且聊天流符合桥接范围时暴露预约工具。"""
+        return self.plugin.config.proactive.enabled and await super().go_activate()
 
     async def execute(
         self,
@@ -248,6 +265,11 @@ class NDFCScheduleProactiveAction(BaseAction):
         """把主动发起预约直接写入桥会话。"""
         if extra:
             logger.debug(f"忽略 schedule_proactive 未知参数: {sorted(extra)}")
+        if (
+            self.plugin.config.bridge.private_only
+            and str(getattr(self.chat_stream, "chat_type", "") or "") != "private"
+        ):
+            return False, "当前配置仅允许在私聊中预约主动发起"
         stream_id = self.chat_stream.stream_id
         async with self.plugin.session_store.lock(stream_id):
             session = await self.plugin.session_store.get_or_create(stream_id)
