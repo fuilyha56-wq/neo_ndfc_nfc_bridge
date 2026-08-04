@@ -1,0 +1,82 @@
+{
+  "name": "neo_ndfc_nfc_bridge",
+  "display_name": "NDFC-NFC桥接",
+  "version": "0.1.0",
+  "description": "让 Neo-Default-Chatter 复用 NeoFatumChatter 的提示词、心理活动、记忆与动作能力",
+  "author": "MoFox Team",
+  "license": "AGPL-3.0",
+  "dependencies": {
+    "plugins": [
+      "neo_default_chatter",
+      "neo_fatum_chatter"
+    ],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "event_handler",
+      "component_name": "ndfc_nfc_bridge",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "ndfc_nfc_bridge_observer",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "nfc_reply",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "do_nothing",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "schedule_proactive",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "nfc_query_activity_pattern",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "nfc_record_habit",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "nfc_query_habits",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "config",
+      "component_name": "config",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "api_version": "1.0.0",
+  "categories": [
+    "chat"
+  ],
+  "tags": [
+    "neo_default_chatter",
+    "neo_fatum_chatter",
+    "bridge",
+    "chat"
+  ]
+}
