@@ -32,14 +32,21 @@ _METADATA_PATTERNS = tuple(
 class _NDFCBridgeAction(BaseAction):
     """仅在桥接配置允许的聊天流中激活。"""
 
+    def _execution_denial(self, operation: str = "执行桥接 Action") -> str | None:
+        """返回当前聊天流不能执行桥接 Action 时的说明。"""
+        bridge_config = self.plugin.config.bridge
+        if not bridge_config.enabled:
+            return "桥接功能当前未启用"
+        if (
+            bridge_config.private_only
+            and str(getattr(self.chat_stream, "chat_type", "") or "") != "private"
+        ):
+            return f"当前配置仅允许在私聊中{operation}"
+        return None
+
     async def go_activate(self) -> bool:
         """根据总开关和私聊范围决定是否暴露 Action。"""
-        if not self.plugin.config.bridge.enabled:
-            return False
-        return not (
-            self.plugin.config.bridge.private_only
-            and str(self.chat_stream.chat_type or "") != "private"
-        )
+        return self._execution_denial() is None
 
 
 class NDFCReplyAction(_NDFCBridgeAction):
@@ -71,6 +78,9 @@ class NDFCReplyAction(_NDFCBridgeAction):
     ) -> tuple[bool, str]:
         """清洗、分段并发送文本消息。"""
         del thought, expected_reaction, max_wait_seconds, mood, reply_to
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
         if extra:
             logger.debug(f"忽略 nfc_reply 未知参数: {sorted(extra)}")
 
@@ -140,6 +150,9 @@ class NDFCDoNothingAction(_NDFCBridgeAction):
     ) -> tuple[bool, str]:
         """确认本轮不发送可见消息。"""
         del thought, expected_reaction, max_wait_seconds, mood
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
         if extra:
             logger.debug(f"忽略 do_nothing 未知参数: {sorted(extra)}")
         return True, "已选择不回复"
@@ -159,6 +172,9 @@ class NDFCUpdateMoodStateAction(_NDFCBridgeAction):
         **extra: Any,
     ) -> tuple[bool, str]:
         """把情绪写入桥会话。"""
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
         if extra:
             logger.debug(f"忽略 update_mood_state 未知参数: {sorted(extra)}")
         if not mood.strip():
@@ -191,6 +207,9 @@ class NDFCRecordUserHabitAction(_NDFCBridgeAction):
         **extra: Any,
     ) -> tuple[bool, str]:
         """把习惯观察写入桥会话。"""
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
         if extra:
             logger.debug(f"忽略 record_user_habit 未知参数: {sorted(extra)}")
         if not habit_text.strip():
@@ -220,6 +239,9 @@ class NDFCQueryActivityPatternAction(_NDFCBridgeAction):
         **extra: Any,
     ) -> tuple[bool, str]:
         """返回本聊天流累计的活跃小时统计。"""
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
         if extra:
             logger.debug(f"忽略 query_activity_pattern 未知参数: {sorted(extra)}")
         session = await self.plugin.session_store.peek(self.chat_stream.stream_id)
@@ -263,13 +285,11 @@ class NDFCScheduleProactiveAction(_NDFCBridgeAction):
         **extra: Any,
     ) -> tuple[bool, str]:
         """把主动发起预约直接写入桥会话。"""
+        denial = self._execution_denial("预约主动发起")
+        if denial is not None:
+            return False, denial
         if extra:
             logger.debug(f"忽略 schedule_proactive 未知参数: {sorted(extra)}")
-        if (
-            self.plugin.config.bridge.private_only
-            and str(getattr(self.chat_stream, "chat_type", "") or "") != "private"
-        ):
-            return False, "当前配置仅允许在私聊中预约主动发起"
         stream_id = self.chat_stream.stream_id
         async with self.plugin.session_store.lock(stream_id):
             session = await self.plugin.session_store.get_or_create(stream_id)

@@ -185,6 +185,39 @@ async def test_schedule_action_rejects_group_when_private_only() -> None:
     assert message == "当前配置仅允许在私聊中预约主动发起"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action_class", "kwargs", "expected_message"),
+    [
+        (actions.NDFCReplyAction, {"content": "不应发送"}, "当前配置仅允许在私聊中执行桥接 Action"),
+        (actions.NDFCDoNothingAction, {}, "当前配置仅允许在私聊中执行桥接 Action"),
+        (actions.NDFCUpdateMoodStateAction, {"mood": "平静"}, "当前配置仅允许在私聊中执行桥接 Action"),
+        (actions.NDFCRecordUserHabitAction, {"habit_text": "早睡"}, "当前配置仅允许在私聊中执行桥接 Action"),
+        (actions.NDFCQueryActivityPatternAction, {}, "当前配置仅允许在私聊中执行桥接 Action"),
+        (actions.NDFCScheduleProactiveAction, {}, "当前配置仅允许在私聊中预约主动发起"),
+    ],
+)
+async def test_direct_action_execution_rejects_group_when_private_only(
+    action_class: type,
+    kwargs: dict[str, object],
+    expected_message: str,
+) -> None:
+    """绕过 go_activate 直接执行时也不得让桥接 Action 作用于群聊。"""
+    plugin = SimpleNamespace(
+        config=SimpleNamespace(
+            bridge=SimpleNamespace(enabled=True, private_only=True),
+            proactive=SimpleNamespace(enabled=True),
+        )
+    )
+    chat_stream = SimpleNamespace(stream_id="stream-group", chat_type="group")
+    action = action_class(chat_stream=chat_stream, plugin=plugin)
+
+    success, message = await action.execute(**kwargs)
+
+    assert success is False
+    assert message == expected_message
+
+
 async def _async_value(value: object) -> object:
     """把普通值包装为可等待结果。"""
     return value
