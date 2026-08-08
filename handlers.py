@@ -9,7 +9,8 @@ from plugins.neo_default_chatter.utils.event_publisher import NdfcEvent
 from src.app.plugin_system.api import prompt_api, stream_api
 from src.app.plugin_system.base import BaseEventHandler
 from src.core.components.types import EventType
-from src.kernel.llm import (
+
+from .snapshot import (
     PayloadSnapshot,
     capture_payload_snapshot,
     restore_payload_snapshot,

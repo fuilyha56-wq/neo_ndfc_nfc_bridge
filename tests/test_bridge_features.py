@@ -153,24 +153,45 @@ def test_session_persists_summary_counter_habits_and_request_snapshot() -> None:
     assert restored.request_snapshot == session.request_snapshot
 
 
+def test_snapshot_discards_entire_interrupted_tool_turn() -> None:
+    """bridge 恢复时不得保留含未闭合工具调用的当前回合。"""
+    from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall
+
+    snapshot = import_module("plugins.neo-ndfc-nfc-bridge.snapshot")
+    captured = snapshot.capture_payload_snapshot(
+        "private-1",
+        [
+            LLMPayload(ROLE.USER, Text("已完成用户消息")),
+            LLMPayload(ROLE.ASSISTANT, Text("已完成助手回复")),
+            LLMPayload(ROLE.USER, Text("中断用户消息")),
+            LLMPayload(
+                ROLE.ASSISTANT,
+                ToolCall("call-incomplete", "action-nfc_reply", {"content": "草稿"}),
+            ),
+        ],
+    )
+
+    assert captured is not None
+    restored = snapshot.restore_payload_snapshot(captured)
+
+    assert [payload.role for payload in restored] == [ROLE.USER, ROLE.ASSISTANT]
+    assert restored[0].content == [Text("已完成用户消息")]
+    assert restored[1].content == [Text("已完成助手回复")]
+
+
 @pytest.mark.asyncio
 async def test_request_snapshot_restores_once_and_suppresses_duplicate_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """bridge 冷启动首个 NDFC 请求应恢复快照而非重复默认历史。"""
     from src.core.components.types import EventType
-    from src.kernel.llm import (
-        LLMPayload,
-        ROLE,
-        Text,
-        ToolCall,
-        ToolResult,
-        capture_payload_snapshot,
-    )
+    from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall, ToolResult
+
+    snapshot = import_module("plugins.neo-ndfc-nfc-bridge.snapshot")
 
     stream_id = "private-1"
     session = state.BridgeSession(user_id="user", stream_id=stream_id)
-    session.request_snapshot = capture_payload_snapshot(
+    session.request_snapshot = snapshot.capture_payload_snapshot(
         stream_id,
         [
             LLMPayload(ROLE.USER, Text("旧消息")),
