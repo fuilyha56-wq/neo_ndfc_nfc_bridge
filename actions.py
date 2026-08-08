@@ -9,6 +9,7 @@ import re
 import time
 from typing import Annotated, Any
 
+from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseAction
 
@@ -77,7 +78,7 @@ class NDFCReplyAction(_NDFCBridgeAction):
         **extra: Any,
     ) -> tuple[bool, str]:
         """清洗、分段并发送文本消息。"""
-        del thought, expected_reaction, max_wait_seconds, mood, reply_to
+        del thought, expected_reaction, max_wait_seconds, mood
         denial = self._execution_denial()
         if denial is not None:
             return False, denial
@@ -121,7 +122,15 @@ class NDFCReplyAction(_NDFCBridgeAction):
         for index, segment in enumerate(segments):
             if index > 0 and delay_max > 0:
                 await asyncio.sleep(random.uniform(delay_min, delay_max))
-            if not await self._send_to_stream(segment):
+            if reply_to and index == 0:
+                success = await send_api.send_text(
+                    content=segment,
+                    stream_id=self.chat_stream.stream_id,
+                    reply_to=reply_to,
+                )
+            else:
+                success = await self._send_to_stream(segment)
+            if not success:
                 return False, f"第 {index + 1} 条消息发送失败，已发送 {sent} 条"
             sent += 1
         return True, f"已发送 {sent} 条消息"
@@ -260,6 +269,109 @@ class NDFCQueryActivityPatternAction(_NDFCBridgeAction):
         return True, f"累计观察 {total} 次；最活跃时段：{details}"
 
 
+class NDFCQueryUserHabitsAction(_NDFCBridgeAction):
+    """查询桥记录的用户习惯观察。"""
+
+    action_name = "query_user_habits"
+    action_description = "查询之前记录的用户习惯，可按分类筛选；结果含可用于纠正或删除的 habit_id。"
+    display_name = "查询用户习惯"
+    chatter_allow = ["neo_default_chatter"]
+    associated_types = ["text"]
+
+    async def execute(
+        self,
+        category: Annotated[str, "可选分类，如 sleep、work、social、hobby 或 routine。"] = "",
+        **extra: Any,
+    ) -> tuple[bool, str]:
+        """返回当前私聊已记录的习惯观察。"""
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
+        if extra:
+            logger.debug(f"忽略 query_user_habits 未知参数: {sorted(extra)}")
+        session = await self.plugin.session_store.peek(self.chat_stream.stream_id)
+        habits = session.get_habits(category) if session is not None else []
+        if not habits:
+            return True, "尚未记录匹配的用户习惯观察"
+        lines = [f"已记录 {len(habits)} 条用户习惯："]
+        for habit in habits:
+            category_text = str(habit.get("category", "") or "").strip()
+            prefix = f"[{category_text}] " if category_text else ""
+            lines.append(
+                f"{prefix}{habit.get('habit_text', '')} "
+                f"（habit_id: {habit.get('id', '')}）"
+            )
+        return True, "\n".join(lines)
+
+
+class NDFCUpdateUserHabitAction(_NDFCBridgeAction):
+    """纠正桥记录的一条用户习惯观察。"""
+
+    action_name = "update_user_habit"
+    action_description = "纠正已有用户习惯。必须先查询习惯并提供 habit_id；至少提供新描述或新分类。"
+    display_name = "纠正用户习惯"
+    chatter_allow = ["neo_default_chatter"]
+    associated_types = ["text"]
+
+    async def execute(
+        self,
+        habit_id: Annotated[str, "query_user_habits 返回的 habit_id。"] = "",
+        habit_text: Annotated[str, "新的习惯描述；不改描述时留空。"] = "",
+        category: Annotated[str, "新的分类；不改分类时留空。"] = "",
+        **extra: Any,
+    ) -> tuple[bool, str]:
+        """更新并持久化一条习惯观察。"""
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
+        if extra:
+            logger.debug(f"忽略 update_user_habit 未知参数: {sorted(extra)}")
+        if not habit_id.strip() or not (habit_text.strip() or category.strip()):
+            return False, "请提供 habit_id，以及新的习惯描述或分类"
+        stream_id = self.chat_stream.stream_id
+        async with self.plugin.session_store.lock(stream_id):
+            session = await self.plugin.session_store.get_or_create(stream_id)
+            if not session.update_habit(
+                habit_id,
+                habit_text=habit_text,
+                category=category,
+            ):
+                return False, f"未找到习惯 ID：{habit_id.strip()}"
+            await self.plugin.session_store.save(session)
+        return True, f"已纠正习惯：{habit_id.strip()}"
+
+
+class NDFCRemoveUserHabitAction(_NDFCBridgeAction):
+    """删除桥记录的一条错误或过期习惯观察。"""
+
+    action_name = "remove_user_habit"
+    action_description = "删除错误或过期的用户习惯。必须先查询习惯并提供 habit_id。"
+    display_name = "删除用户习惯"
+    chatter_allow = ["neo_default_chatter"]
+    associated_types = ["text"]
+
+    async def execute(
+        self,
+        habit_id: Annotated[str, "query_user_habits 返回的 habit_id。"] = "",
+        **extra: Any,
+    ) -> tuple[bool, str]:
+        """删除并持久化一条习惯观察。"""
+        denial = self._execution_denial()
+        if denial is not None:
+            return False, denial
+        if extra:
+            logger.debug(f"忽略 remove_user_habit 未知参数: {sorted(extra)}")
+        if not habit_id.strip():
+            return False, "请提供 habit_id"
+        stream_id = self.chat_stream.stream_id
+        async with self.plugin.session_store.lock(stream_id):
+            session = await self.plugin.session_store.get_or_create(stream_id)
+            if not session.remove_habit(habit_id):
+                return False, f"未找到习惯 ID：{habit_id.strip()}"
+            await self.plugin.session_store.save(session)
+        return True, f"已删除习惯：{habit_id.strip()}"
+
+
 class NDFCScheduleProactiveAction(_NDFCBridgeAction):
     """设置或取消桥自己的主动发起预约。"""
 
@@ -313,6 +425,9 @@ BRIDGE_NFC_ACTIONS: list[type[BaseAction]] = [
     NDFCUpdateMoodStateAction,
     NDFCRecordUserHabitAction,
     NDFCQueryActivityPatternAction,
+    NDFCQueryUserHabitsAction,
+    NDFCUpdateUserHabitAction,
+    NDFCRemoveUserHabitAction,
     NDFCScheduleProactiveAction,
 ]
 
@@ -321,8 +436,11 @@ __all__ = [
     "BRIDGE_NFC_ACTIONS",
     "NDFCDoNothingAction",
     "NDFCQueryActivityPatternAction",
+    "NDFCQueryUserHabitsAction",
     "NDFCRecordUserHabitAction",
     "NDFCReplyAction",
+    "NDFCRemoveUserHabitAction",
     "NDFCScheduleProactiveAction",
+    "NDFCUpdateUserHabitAction",
     "NDFCUpdateMoodStateAction",
 ]

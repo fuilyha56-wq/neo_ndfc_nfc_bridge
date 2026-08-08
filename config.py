@@ -141,8 +141,24 @@ class NdfcNfcBridgeConfig(BaseConfig):
         """心理日志与近期记忆设置。"""
 
         max_log_entries: int = Field(default=50, description="最大心理活动条目数。")
+        request_snapshot_enabled: bool = Field(
+            default=True,
+            description="保存完整请求体，并在重启后的首个私聊请求恢复。",
+        )
         summary_enabled: bool = Field(
             default=True, description="注入已有的近期记忆摘要。"
+        )
+        compress_every_n_rounds: int = Field(
+            default=50,
+            description="每完成 N 次实际回复触发一次近期记忆压缩。",
+        )
+        compress_days_window: float = Field(
+            default=3.0,
+            description="生成摘要时覆盖的近期消息时间窗口（天）。",
+        )
+        min_compress_interval_minutes: float = Field(
+            default=120.0,
+            description="两次近期记忆压缩之间的最短间隔（分钟）。",
         )
 
     prompt: PromptSection = Field(default_factory=PromptSection)

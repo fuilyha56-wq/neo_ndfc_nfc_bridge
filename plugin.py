@@ -10,7 +10,11 @@ from src.app.plugin_system.base import BasePlugin, register_plugin
 
 from .actions import BRIDGE_NFC_ACTIONS
 from .config import NdfcNfcBridgeConfig
-from .handlers import NdfcNfcBridgeHandler, NdfcNfcBridgeObserver
+from .handlers import (
+    NdfcNfcBridgeHandler,
+    NdfcNfcBridgeObserver,
+    NdfcNfcRequestSnapshotHandler,
+)
 from .proactive import ProactiveScheduler
 from .state import BridgeSessionStore
 
@@ -69,7 +73,11 @@ class NdfcNfcBridgePlugin(BasePlugin):
         config = cast(NdfcNfcBridgeConfig, self.config)
         if not config.bridge.enabled:
             return []
-        components: list[type] = [NdfcNfcBridgeHandler, NdfcNfcBridgeObserver]
+        components: list[type] = [
+            NdfcNfcBridgeHandler,
+            NdfcNfcBridgeObserver,
+            NdfcNfcRequestSnapshotHandler,
+        ]
         if config.bridge.expose_nfc_actions:
             components.extend(BRIDGE_NFC_ACTIONS)
         return components

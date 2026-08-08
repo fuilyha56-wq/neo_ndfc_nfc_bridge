@@ -27,6 +27,12 @@
       "enabled": true
     },
     {
+      "component_type": "event_handler",
+      "component_name": "ndfc_nfc_request_snapshot",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
       "component_type": "action",
       "component_name": "nfc_reply",
       "dependencies": [],
@@ -59,6 +65,24 @@
     {
       "component_type": "action",
       "component_name": "update_mood_state",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "query_user_habits",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "update_user_habit",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "remove_user_habit",
       "dependencies": [],
       "enabled": true
     },

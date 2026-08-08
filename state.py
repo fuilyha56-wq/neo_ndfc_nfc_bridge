@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -173,7 +174,11 @@ class MentalLog:
             if entry.event_type != NFCEventType.BOT_PLANNING:
                 continue
             for action in entry.actions:
-                if action.get("type") not in {"nfc_reply", "respond"}:
+                if action.get("type") not in {
+                    "nfc_reply",
+                    "action-nfc_reply",
+                    "respond",
+                }:
                     continue
                 content = action.get("content", "")
                 if isinstance(content, list):
@@ -236,6 +241,9 @@ class BridgeSession:
     pending_proactive_context: str = ""
     mental_log: MentalLog = field(default_factory=MentalLog)
     history_summary: str = ""
+    last_compress_at: float = 0.0
+    compress_round_count: int = 0
+    request_snapshot: dict[str, Any] = field(default_factory=dict)
     mood_history: list[dict[str, Any]] = field(default_factory=list)
     activity_hours: dict[str, int] = field(default_factory=dict)
     user_habits: list[dict[str, Any]] = field(default_factory=list)
@@ -334,12 +342,59 @@ class BridgeSession:
             return
         self.user_habits.append(
             {
+                "id": uuid.uuid4().hex[:8],
                 "habit_text": value,
                 "category": category.strip(),
                 "recorded_at": time.time(),
             }
         )
         self.user_habits = self.user_habits[-50:]
+
+    def get_habits(self, category: str = "") -> list[dict[str, Any]]:
+        """返回已记录习惯，可选按分类筛选。"""
+        target_category = category.strip().lower()
+        if not target_category:
+            return list(self.user_habits)
+        return [
+            habit
+            for habit in self.user_habits
+            if str(habit.get("category", "") or "").lower() == target_category
+        ]
+
+    def update_habit(
+        self,
+        habit_id: str,
+        *,
+        habit_text: str = "",
+        category: str = "",
+    ) -> bool:
+        """按稳定 ID 修正一条习惯观察。"""
+        target_id = habit_id.strip()
+        if not target_id:
+            return False
+        for habit in self.user_habits:
+            if str(habit.get("id", "") or "") != target_id:
+                continue
+            if habit_text.strip():
+                habit["habit_text"] = habit_text.strip()
+            if category.strip():
+                habit["category"] = category.strip()
+            habit["updated_at"] = time.time()
+            return True
+        return False
+
+    def remove_habit(self, habit_id: str) -> bool:
+        """按稳定 ID 删除一条错误或过期的习惯观察。"""
+        target_id = habit_id.strip()
+        if not target_id:
+            return False
+        original_count = len(self.user_habits)
+        self.user_habits = [
+            habit
+            for habit in self.user_habits
+            if str(habit.get("id", "") or "") != target_id
+        ]
+        return len(self.user_habits) != original_count
 
     def set_scheduled_proactive(self, at: float | None, reason: str = "") -> None:
         """设置或清除下一次主动发起预约。"""
@@ -362,6 +417,9 @@ class BridgeSession:
             "scheduled_proactive_reason": self.scheduled_proactive_reason,
             "mental_log": self.mental_log.to_list(),
             "history_summary": self.history_summary,
+            "last_compress_at": self.last_compress_at,
+            "compress_round_count": self.compress_round_count,
+            "request_snapshot": self.request_snapshot,
             "mood_history": self.mood_history,
             "activity_hours": self.activity_hours,
             "user_habits": self.user_habits,
@@ -404,6 +462,12 @@ class BridgeSession:
         if isinstance(raw_log, list):
             session.mental_log = MentalLog.from_list(raw_log, max_log_entries)
         session.history_summary = str(data.get("history_summary", "") or "")
+        session.last_compress_at = float(data.get("last_compress_at", 0) or 0)
+        session.compress_round_count = int(data.get("compress_round_count", 0) or 0)
+        raw_snapshot = data.get("request_snapshot", {})
+        session.request_snapshot = (
+            dict(raw_snapshot) if isinstance(raw_snapshot, dict) else {}
+        )
         session.mood_history = [
             item for item in data.get("mood_history", []) if isinstance(item, dict)
         ][-30:]
@@ -414,9 +478,18 @@ class BridgeSession:
                 for hour, count in raw_hours.items()
                 if isinstance(count, (int, float)) and not isinstance(count, bool)
             }
-        session.user_habits = [
-            item for item in data.get("user_habits", []) if isinstance(item, dict)
-        ][-50:]
+        session.user_habits = []
+        for item in data.get("user_habits", []):
+            if not isinstance(item, dict):
+                continue
+            habit_text = str(item.get("habit_text", "") or "").strip()
+            if not habit_text:
+                continue
+            habit = dict(item)
+            habit["habit_text"] = habit_text
+            habit["id"] = str(habit.get("id", "") or uuid.uuid4().hex[:8])
+            session.user_habits.append(habit)
+        session.user_habits = session.user_habits[-50:]
         session.total_interactions = int(data.get("total_interactions", 0) or 0)
         return session
 

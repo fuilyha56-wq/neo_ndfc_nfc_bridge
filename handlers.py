@@ -8,6 +8,12 @@ from typing import Any, cast
 from plugins.neo_default_chatter.utils.event_publisher import NdfcEvent
 from src.app.plugin_system.api import prompt_api, stream_api
 from src.app.plugin_system.base import BaseEventHandler
+from src.core.components.types import EventType
+from src.kernel.llm import (
+    PayloadSnapshot,
+    capture_payload_snapshot,
+    restore_payload_snapshot,
+)
 from src.kernel.event import EventDecision
 
 from .capabilities import (
@@ -17,6 +23,10 @@ from .capabilities import (
 )
 from .config import NdfcNfcBridgeConfig
 from .state import WaitingConfig
+from .summary import BridgeSummaryService
+
+_NDFC_REQUEST_NAME = "neo_default_chatter"
+_NON_HISTORY_ROLES = {"system", "tool"}
 
 
 class NdfcNfcBridgeHandler(BaseEventHandler):
@@ -92,6 +102,13 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
 
         if event == NdfcEvent.BUILD_HISTORY_TEXT and config.use_nfc_history:
             session = await self._get_session(params["stream_id"])
+            if (
+                self._config().prompt.request_snapshot_enabled
+                and session.request_snapshot
+                and params["stream_id"] not in NdfcNfcRequestSnapshotHandler._restored_streams
+            ):
+                params["lines"] = []
+                return EventDecision.STOP, params
             narrative = BridgePromptBuilder().build_fused_narrative(
                 params["chat_stream"],
                 session,
@@ -317,7 +334,9 @@ class NdfcNfcBridgeObserver(BaseEventHandler):
         stream_id = params["stream_id"]
         async with session_store.lock(stream_id):
             session = await session_store.get_or_create(stream_id)
+            replied = False
             for call in successful_calls:
+                action_name = _normalize_action_name(getattr(call, "name", ""))
                 args = dict(call.args) if isinstance(call.args, dict) else {}
                 wait_seconds = 0.0
                 if config.bridge.use_nfc_waiting:
@@ -327,7 +346,7 @@ class NdfcNfcBridgeObserver(BaseEventHandler):
                     )
                 session.add_bot_planning(
                     thought=str(args.get("thought") or ""),
-                    actions=[{"type": call.name, **args}],
+                    actions=[{"type": action_name, **args}],
                     expected_reaction=str(args.get("expected_reaction") or ""),
                     max_wait_seconds=wait_seconds,
                 )
@@ -347,8 +366,107 @@ class NdfcNfcBridgeObserver(BaseEventHandler):
                         )
                     else:
                         session.clear_waiting()
+                if action_name == "nfc_reply":
+                    replied = True
+            if replied:
+                session.compress_round_count += 1
+            should_schedule_summary = replied and BridgeSummaryService.should_schedule(
+                session,
+                config,
+            )
             await session_store.save(session)
+        if should_schedule_summary:
+            BridgeSummaryService.schedule(self.plugin, stream_id)
         return EventDecision.PASS, params
 
 
-__all__ = ["NdfcNfcBridgeHandler", "NdfcNfcBridgeObserver"]
+def _normalize_action_name(value: object) -> str:
+    """将 NDFC 的框架动作名归一化为心理日志使用的领域名称。"""
+    name = str(value or "")
+    return name.removeprefix("action-")
+
+
+class NdfcNfcRequestSnapshotHandler(BaseEventHandler):
+    """保存并恢复 bridge 作用域内 NDFC 的完整请求体。"""
+
+    name = "ndfc_nfc_request_snapshot"
+    description = "保存并恢复 NDFC 的完整请求体快照"
+    display_name = "请求体恢复"
+    weight = 20
+    timeout: float | None = 0
+    init_subscribe = [EventType.BEFORE_LLM_REQUEST]
+
+    _restored_streams: set[str] = set()
+
+    async def execute(
+        self,
+        event_name: str,
+        params: dict[str, Any],
+    ) -> tuple[EventDecision, dict[str, Any]]:
+        """在冷启动首个 NDFC 请求恢复快照并覆盖保存最终 payload。"""
+        if str(event_name) != EventType.BEFORE_LLM_REQUEST.value:
+            return EventDecision.PASS, params
+        if str(params.get("request_name") or "") != _NDFC_REQUEST_NAME:
+            return EventDecision.PASS, params
+
+        config = cast(NdfcNfcBridgeConfig, self.plugin.config)
+        if not config.bridge.enabled or not config.prompt.request_snapshot_enabled:
+            return EventDecision.PASS, params
+        meta_data = params.get("meta_data")
+        stream_id = (
+            str(meta_data.get("stream_id") or "")
+            if isinstance(meta_data, dict)
+            else ""
+        )
+        payloads = params.get("payloads")
+        if not stream_id or not isinstance(payloads, list):
+            return EventDecision.PASS, params
+
+        if config.bridge.private_only:
+            chat_stream = await stream_api.get_stream(stream_id)
+            if str(getattr(chat_stream, "chat_type", "") or "") != "private":
+                return EventDecision.PASS, params
+
+        session_store = self.plugin.session_store
+        async with session_store.lock(stream_id):
+            session = await session_store.get_or_create(stream_id)
+            if stream_id not in self._restored_streams:
+                if session.request_snapshot:
+                    restored = restore_payload_snapshot(
+                        PayloadSnapshot.from_dict(session.request_snapshot)
+                    )
+                    if restored:
+                        params["payloads"] = self._inject_history(payloads, restored)
+                        payloads = params["payloads"]
+                        logger = __import__("src.app.plugin_system.api.log_api", fromlist=["get_logger"]).get_logger(
+                            "neo_ndfc_nfc_bridge.snapshot"
+                        )
+                        logger.info(
+                            f"已恢复 bridge 请求体: stream={stream_id[:8]} "
+                            f"payloads={len(restored)}"
+                        )
+                self._restored_streams.add(stream_id)
+
+            snapshot = capture_payload_snapshot(stream_id, payloads)
+            if snapshot is not None:
+                session.request_snapshot = snapshot.to_dict()
+                await session_store.save(session)
+        return EventDecision.SUCCESS, params
+
+    @staticmethod
+    def _inject_history(payloads: list[Any], restored: list[Any]) -> list[Any]:
+        """把快照历史插入当前 system/tool 声明之后。"""
+        split_at = 0
+        for index, payload in enumerate(payloads):
+            role = getattr(getattr(payload, "role", None), "value", None)
+            if str(role or "") not in _NON_HISTORY_ROLES:
+                break
+            split_at = index + 1
+        return payloads[:split_at] + restored + payloads[split_at:]
+
+
+__all__ = [
+    "NdfcNfcBridgeHandler",
+    "NdfcNfcBridgeObserver",
+    "NdfcNfcRequestSnapshotHandler",
+]
