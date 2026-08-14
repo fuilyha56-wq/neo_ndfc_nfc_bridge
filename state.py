@@ -230,6 +230,7 @@ class BridgeSession:
     user_id: str
     stream_id: str
     platform: str = ""
+    user_name: str = ""
     waiting_config: WaitingConfig = field(default_factory=WaitingConfig)
     consecutive_timeout_count: int = 0
     created_at: float = field(default_factory=time.time)
@@ -296,6 +297,33 @@ class BridgeSession:
         hour = str(time.localtime(message_time).tm_hour)
         self.activity_hours[hour] = self.activity_hours.get(hour, 0) + 1
         return entry
+
+    def bind_user_identity(
+        self,
+        user_id: str,
+        user_name: str = "",
+        platform: str = "",
+    ) -> bool:
+        """绑定当前流的真实收件人，并在身份变化时隔离旧心理状态。"""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return False
+        changed = bool(self.user_id and self.user_id != normalized_user_id)
+        if changed:
+            self.waiting_config.reset()
+            self.mental_log = MentalLog(self.mental_log._max_entries)
+            self.history_summary = ""
+            self.mood_history = []
+            self.user_habits = []
+            self.request_snapshot = {}
+            self.last_compress_at = 0.0
+            self.compress_round_count = 0
+        self.user_id = normalized_user_id
+        if user_name.strip():
+            self.user_name = user_name.strip()
+        if platform.strip():
+            self.platform = platform.strip()
+        return changed
 
     def add_bot_planning(
         self,
@@ -407,6 +435,7 @@ class BridgeSession:
             "user_id": self.user_id,
             "stream_id": self.stream_id,
             "platform": self.platform,
+            "user_name": self.user_name,
             "waiting_config": self.waiting_config.to_dict(),
             "consecutive_timeout_count": self.consecutive_timeout_count,
             "created_at": self.created_at,
@@ -437,6 +466,7 @@ class BridgeSession:
             user_id=str(data.get("user_id", "") or ""),
             stream_id=str(data.get("stream_id", "") or ""),
             platform=str(data.get("platform", "") or ""),
+            user_name=str(data.get("user_name", "") or ""),
         )
         session.waiting_config = WaitingConfig.from_dict(
             dict(data.get("waiting_config", {}) or {})

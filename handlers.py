@@ -260,6 +260,13 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
         stream_id = params["stream_id"]
         async with session_store.lock(stream_id):
             session = await session_store.get_or_create(stream_id)
+            chat_stream = params.get("chat_stream")
+            if chat_stream is not None:
+                session.bind_user_identity(
+                    user_id=getattr(unreads[-1], "sender_id", "") or session.user_id,
+                    user_name=getattr(unreads[-1], "sender_name", "") or "",
+                    platform=getattr(chat_stream, "platform", "") or "",
+                )
             for message in unreads:
                 session.add_user_message(
                     content=getattr(message, "processed_plain_text", "")
@@ -268,12 +275,6 @@ class NdfcNfcBridgeHandler(BaseEventHandler):
                     user_id=getattr(message, "sender_id", "") or "",
                     timestamp=getattr(message, "time", None),
                     message_id=getattr(message, "message_id", "") or "",
-                )
-            chat_stream = params.get("chat_stream")
-            if chat_stream is not None:
-                session.platform = getattr(chat_stream, "platform", "") or ""
-                session.user_id = (
-                    getattr(unreads[-1], "sender_id", "") or session.user_id
                 )
             await session_store.save(session)
 

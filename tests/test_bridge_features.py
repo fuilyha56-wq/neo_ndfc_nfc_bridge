@@ -10,6 +10,7 @@ from typing import AsyncIterator
 import pytest
 
 actions = import_module("plugins.neo-ndfc-nfc-bridge.actions")
+capabilities = import_module("plugins.neo-ndfc-nfc-bridge.capabilities")
 handlers = import_module("plugins.neo-ndfc-nfc-bridge.handlers")
 state = import_module("plugins.neo-ndfc-nfc-bridge.state")
 
@@ -151,6 +152,77 @@ def test_session_persists_summary_counter_habits_and_request_snapshot() -> None:
     assert restored.last_compress_at == 100.0
     assert restored.compress_round_count == 3
     assert restored.request_snapshot == session.request_snapshot
+
+
+def test_identity_change_discards_cross_user_mental_state() -> None:
+    """同一流重新绑定到其他用户时不得继承旧关系记忆。"""
+    session = state.BridgeSession(
+        user_id="old-user",
+        user_name="雪绒",
+        stream_id="private-1",
+    )
+    session.history_summary = "雪绒的关系摘要"
+    session.add_bot_planning("等待雪绒回复", [])
+    session.add_habit("习惯在凌晨调试", "schedule")
+    session.record_mood("期待")
+    session.request_snapshot = {"entries": ["旧请求"]}
+    session.set_waiting(state.WaitingConfig(max_wait_seconds=60, started_at=1.0))
+
+    changed = session.bind_user_identity("new-user", "Lycoris radiata", "qq")
+
+    assert changed is True
+    assert session.user_id == "new-user"
+    assert session.user_name == "Lycoris radiata"
+    assert session.platform == "qq"
+    assert session.mental_log.entries == []
+    assert session.history_summary == ""
+    assert session.user_habits == []
+    assert session.mood_history == []
+    assert session.request_snapshot == {}
+    assert session.is_waiting() is False
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_binds_decision_to_verified_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """系统提示词必须明确当前收件人并禁止跨联系人套用关系。"""
+    monkeypatch.setattr(
+        capabilities,
+        "get_core_config",
+        lambda: SimpleNamespace(
+            personality=SimpleNamespace(
+                nickname="Navi",
+                alias_names=[],
+                identity="测试身份",
+                personality_core="冷静",
+                personality_side="",
+                reply_style="自然",
+                background_story="",
+                safety_guidelines=[],
+                negative_behaviors=[],
+            )
+        ),
+    )
+    session = state.BridgeSession(
+        user_id="3786449228",
+        user_name="Lycoris radiata",
+        stream_id="private-1",
+        platform="qq",
+    )
+    session.history_summary = "旧记忆中曾提到雪绒。"
+    prompt = await capabilities.BridgePromptBuilder().build_system_prompt(
+        SimpleNamespace(stream_id="private-1", chat_type="private", platform="qq"),
+        session,
+        SimpleNamespace(
+            prompt=SimpleNamespace(summary_enabled=True),
+            model=SimpleNamespace(custom_decision_prompt=""),
+        ),
+    )
+
+    assert "当前已验证收件人：Lycoris radiata（qq user_id=3786449228）" in prompt
+    assert "只能发给上述收件人" in prompt
+    assert "绝不能把其他人的称呼、关系、经历或期待套用到当前收件人" in prompt
 
 
 def test_snapshot_discards_entire_interrupted_tool_turn() -> None:

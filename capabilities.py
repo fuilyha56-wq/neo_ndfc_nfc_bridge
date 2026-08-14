@@ -123,6 +123,8 @@ class BridgePromptBuilder:
         personality = get_core_config().personality
         chat_type = str(getattr(chat_stream, "chat_type", "未知"))
         platform = str(getattr(chat_stream, "platform", "") or "未知")
+        recipient_name = session.user_name.strip() or "未记录昵称"
+        recipient_id = session.user_id.strip() or "未验证"
         aliases = "、".join(personality.alias_names) or "无"
         safety = "\n".join(f"- {item}" for item in personality.safety_guidelines)
         negatives = "\n".join(f"- {item}" for item in personality.negative_behaviors)
@@ -166,6 +168,8 @@ class BridgePromptBuilder:
 平台：{platform}
 聊天类型：{chat_type}
 聊天流：{chat_stream.stream_id}
+当前已验证收件人：{recipient_name}（{platform} user_id={recipient_id}）
+身份边界：本轮所有回复和主动消息只能发给上述收件人。近期记忆、心理活动或聊天记录中提到的其他人只是背景人物，绝不能把其他人的称呼、关系、经历或期待套用到当前收件人；如果记忆与当前收件人冲突，以当前已验证收件人为准。
 当前日期：{datetime.datetime.now().strftime("%Y-%m-%d")}
 近期主导情绪：{mood}{scheduled}
 
