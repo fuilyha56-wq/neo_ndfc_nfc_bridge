@@ -10,7 +10,7 @@ import random
 import time
 from typing import TYPE_CHECKING, Any
 
-from src.app.plugin_system.api import service_api, stream_api
+from src.app.plugin_system.api import config_api, service_api, stream_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import Failure, WaitResumeEvent
 from src.kernel.concurrency import get_task_manager
@@ -132,7 +132,11 @@ class ProactiveScheduler:
             self._pending_streams.add(stream_id)
             try:
                 prompt = self._build_resume_prompt(session, reason, is_scheduled, now)
-                outcome = await self._wake_ndfc(stream_id, prompt)
+                outcome = await self._wake_ndfc(
+                    stream_id,
+                    prompt,
+                    recipient_user_id=session.user_id,
+                )
                 if outcome is _WakeOutcome.RETRY:
                     logger.warning(f"主动发起唤醒失败: stream={stream_id[:8]}")
                     continue
@@ -163,7 +167,12 @@ class ProactiveScheduler:
             finally:
                 self._pending_streams.discard(stream_id)
 
-    async def _wake_ndfc(self, stream_id: str, prompt: str) -> _WakeOutcome:
+    async def _wake_ndfc(
+        self,
+        stream_id: str,
+        prompt: str,
+        recipient_user_id: str = "",
+    ) -> _WakeOutcome:
         """通过 NDFC Service 独立驱动主动决策，不改动流上的 Chatter 绑定。"""
         chat_stream = await stream_api.activate_stream(stream_id)
         if chat_stream is None:
@@ -177,6 +186,12 @@ class ProactiveScheduler:
                     f"stream={stream_id[:8]} chat_type={chat_type or 'unknown'}"
                 )
                 return _WakeOutcome.SKIPPED
+        if not await self._is_onebot_stream_allowed(
+            stream_id,
+            chat_stream,
+            recipient_user_id,
+        ):
+            return _WakeOutcome.SKIPPED
 
         context = chat_stream.context
         if (
@@ -226,6 +241,79 @@ class ProactiveScheduler:
             return _WakeOutcome.RETRY
         finally:
             await runner.aclose()
+
+    @staticmethod
+    async def _is_onebot_stream_allowed(
+        stream_id: str,
+        chat_stream: Any,
+        recipient_user_id: str,
+    ) -> bool:
+        """按当前 OneBot 黑白名单判断主动消息是否允许发送。"""
+        platform = str(getattr(chat_stream, "platform", "") or "")
+        if platform != "qq":
+            return True
+        config = config_api.get_config("onebot_adapter")
+        features = getattr(config, "features", None)
+        if features is None:
+            return True
+        stream_info = await stream_api.get_stream_info(stream_id)
+        if not isinstance(stream_info, dict):
+            logger.warning(
+                f"无法读取主动发起流信息，跳过发送: stream={stream_id[:8]}"
+            )
+            return False
+        chat_type = str(stream_info.get("chat_type", "") or "")
+        if chat_type == "group":
+            group_id = str(stream_info.get("group_id", "") or "")
+            if not group_id:
+                logger.warning(
+                    f"群聊流缺少 group_id，跳过主动发起: stream={stream_id[:8]}"
+                )
+                return False
+            allowed = ProactiveScheduler._matches_list_policy(
+                group_id,
+                str(getattr(features, "group_list_type", "blacklist")),
+                getattr(features, "group_list", []),
+            )
+        elif chat_type == "private":
+            user_id = str(recipient_user_id or "").strip()
+            if not user_id:
+                logger.warning(
+                    f"私聊流缺少用户 ID，跳过主动发起: stream={stream_id[:8]}"
+                )
+                return False
+            if user_id in {str(item) for item in getattr(features, "ban_user_id", [])}:
+                logger.info(
+                    f"私聊用户在 OneBot 全局封禁列表中，跳过主动发起: user={user_id}"
+                )
+                return False
+            allowed = ProactiveScheduler._matches_list_policy(
+                user_id,
+                str(getattr(features, "private_list_type", "blacklist")),
+                getattr(features, "private_list", []),
+            )
+        else:
+            logger.warning(
+                f"未知聊天类型，跳过主动发起: stream={stream_id[:8]} type={chat_type!r}"
+            )
+            return False
+        if not allowed:
+            logger.info(
+                f"OneBot 当前名单不允许主动发起，跳过: stream={stream_id[:8]}"
+            )
+        return allowed
+
+    @staticmethod
+    def _matches_list_policy(
+        target_id: str,
+        list_type: str,
+        configured_ids: Any,
+    ) -> bool:
+        """按 OneBot 入站路径相同的黑白名单语义匹配目标。"""
+        configured = {str(item) for item in configured_ids}
+        if list_type == "whitelist":
+            return target_id in configured
+        return target_id not in configured
 
     @staticmethod
     def _build_resume_prompt(

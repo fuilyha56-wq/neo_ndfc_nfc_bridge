@@ -126,7 +126,12 @@ async def test_scheduled_group_skip_consumes_obsolete_appointment(
     plugin = _plugin(session)
     scheduler = proactive.ProactiveScheduler(plugin)
 
-    async def skip_wake(_stream_id: str, _prompt: str):
+    async def skip_wake(
+        _stream_id: str,
+        _prompt: str,
+        recipient_user_id: str = "",
+    ):
+        del recipient_user_id
         return proactive._WakeOutcome.SKIPPED
 
     monkeypatch.setattr(scheduler, "_wake_ndfc", skip_wake)
@@ -147,7 +152,12 @@ async def test_retry_keeps_scheduled_appointment(
     plugin = _plugin(session)
     scheduler = proactive.ProactiveScheduler(plugin)
 
-    async def retry_wake(_stream_id: str, _prompt: str):
+    async def retry_wake(
+        _stream_id: str,
+        _prompt: str,
+        recipient_user_id: str = "",
+    ):
+        del recipient_user_id
         return proactive._WakeOutcome.RETRY
 
     monkeypatch.setattr(scheduler, "_wake_ndfc", retry_wake)
@@ -156,6 +166,61 @@ async def test_retry_keeps_scheduled_appointment(
 
     assert session.scheduled_proactive_at == 1.0
     assert plugin.session_store.saved == 0
+
+
+@pytest.mark.asyncio
+async def test_private_whitelist_change_blocks_existing_proactive_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OneBot 白名单更新后，已有私聊会话不得继续被主动唤醒。"""
+    stream_id = "stream-private"
+    session = state.BridgeSession(user_id="blocked-user", stream_id=stream_id)
+    plugin = _plugin(session)
+    chat_stream = SimpleNamespace(
+        platform="qq",
+        chat_type="private",
+        context=SimpleNamespace(
+            unread_messages=[],
+            message_cache=[],
+            is_chatter_processing=False,
+        ),
+    )
+    monkeypatch.setattr(
+        proactive.stream_api,
+        "activate_stream",
+        lambda _stream_id: _async_value(chat_stream),
+    )
+    monkeypatch.setattr(
+        proactive.stream_api,
+        "get_stream_info",
+        lambda _stream_id: _async_value({"chat_type": "private"}),
+    )
+    monkeypatch.setattr(
+        proactive.config_api,
+        "get_config",
+        lambda _plugin_name: SimpleNamespace(
+            features=SimpleNamespace(
+                private_list_type="whitelist",
+                private_list=["allowed-user"],
+                group_list_type="blacklist",
+                group_list=[],
+                ban_user_id=[],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        proactive.service_api,
+        "get_service",
+        lambda _signature: pytest.fail("白名单外流不应创建 NDFC 会话"),
+    )
+
+    outcome = await proactive.ProactiveScheduler(plugin)._wake_ndfc(
+        stream_id,
+        "主动提示",
+        recipient_user_id=session.user_id,
+    )
+
+    assert outcome is proactive._WakeOutcome.SKIPPED
 
 
 @pytest.mark.asyncio
